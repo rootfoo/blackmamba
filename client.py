@@ -26,6 +26,23 @@ class Context:
 		self.request = None
 		self.response = ""
 
+class TimeoutError(Exception):
+	pass
+
+class ConnectError(Exception):
+	pass
+
+class NameError(Exception):
+	pass
+
+class ResetError(Exception):
+	pass
+	
+class SockError(Exception):
+	pass
+
+class EpollError(Exception):
+	pass
 
 
 class connect:
@@ -73,10 +90,7 @@ class connect:
 		
 		# except DNS errors
 		except socket.gaierror as ex:
-			print "DNS lookup failed." 
-			print repr(self.host), dns_cache
-			sys.exit(1)
-
+			task.throw(NameError("NameError [%s] %s" % (ex.args)))
 
 
 def connect_ex(context):
@@ -118,16 +132,14 @@ def connect_ex(context):
 		# not sure what to do with this yet
 		elif err == errno.ETIMEDOUT:
 			connecting.pop(fileno, None)
-			code = errno.errorcode[err]
-			msg = "%s %s - %s" % (err, code, "Timeout while connecting")
+			msg = "ConnectError [%s] Timeout while connecting" % (errno.errorcode[err])
 			if DEBUG: print msg
-			task.throw(Exception(msg))
+			task.throw(ConnectError(msg))
 
 		else:
-			code = errno.errorcode[err]
-			msg = "%s %s - %s" % (err, code, "Error while connecting")
+			msg = "ConnectError [%s] Error while connecting" % (errno.errorcode[err])
 			if DEBUG: print msg
-			task.throw(Exception(msg))
+			task.throw(ConnectError(msg))
 	
 	except StopIteration:
 		connections.pop(fileno, None)
@@ -273,7 +285,7 @@ def run(taskgen):
 				# throw unhandled states to task
 				else:
 					# includes select.EPOLLERR
-					task.throw(Exception('Unhandled EPOLL event [%s]' % event))
+					task.throw(EpollError("EpollError [%s]" % event))
 					sys.exit(1)
 
 			# throw any socket/epoll exceptions not handled by other methods
@@ -287,8 +299,11 @@ def run(taskgen):
 					#timeouts.pop(fileno, None)
 					# dont close already closed connections
 				
-				task.throw(Exception('socket.error [%s] %s' % (err, errmsg)))
+					task.throw(ResetError("ResetError [%s] %s" % (err, errmsg)))
 			
+				else:
+					task.throw(SockError("SockError [%s] %s" % (err, errmsg)))
+
 			# coroutine exited without closing connection
 			except StopIteration as ex:
 				if DEBUG: print "StopIteration, removing task"
