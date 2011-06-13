@@ -4,7 +4,7 @@ import time
 from Queue import Queue
 import errno
 
-DEBUG = True
+DEBUG = False 
 
 dns_cache = {}		# {host : ip}
 connecting = {}		# {fileno : context}
@@ -17,15 +17,20 @@ maxcons = 1000
 
 class Context:
 	def __init__(self, task):
+		"""
+		A Context associates a task with a socket, request, response, ...
+		"""
 		self.task = task
 
 	def throw(self, error):
+		"""A convenience method to pass exceptions to a task"""
 		try:
 			self.task.throw(error)
 		except StopIteration as ex:
 			self.close()
 
 	def send(self, sendval=None):
+		"""A convenience method to advance a task (coroutine) to it's next state"""
 		try:
 			syscall = self.task.send(sendval)
 			syscall(self)
@@ -36,6 +41,7 @@ class Context:
 			return False
 
 	def close(self):
+		"""Convenience method to remove a task from the run loop"""
 		connections.pop(self.fileno, None)
 		connecting.pop(self.fileno, None)
 		#tasks.pop(self.task, None)

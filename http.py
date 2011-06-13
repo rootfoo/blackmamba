@@ -76,5 +76,7 @@ if __name__=='__main__':
 	for k,v in stats.items():
 		print '%s : %s' % (k,v)
 
-	print "time : %.4f seconds" % (end-start)
+	completed = stats['Completed']
+	print "%i connections completed in %.3f seconds (%.3f per sec)\n" % (completed, end-start, completed/(end-start)) 
+
 
