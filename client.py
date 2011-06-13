@@ -1,24 +1,22 @@
 import socket, select
 import sys, struct
 import time
-from Queue import Queue
 import errno
 
-DEBUG = False 
+DEBUG = True
 
 dns_cache = {}		# {host : ip}
 connecting = {}		# {fileno : context}
 connections = {}	# {fileno : context}
-#tasks = {}			# {task : context}
 
 epoll = select.epoll()
-#timeout_poll = 5 	# timeout pulling frequency in seconds
-maxcons = 1000
+maxcons = 2000
 
 class Context:
 	def __init__(self, task):
 		"""
 		A Context associates a task with a socket, request, response, ...
+		task is the only required attribute. All others are set dynamically.
 		"""
 		self.task = task
 
@@ -42,9 +40,9 @@ class Context:
 
 	def close(self):
 		"""Convenience method to remove a task from the run loop"""
-		connections.pop(self.fileno, None)
-		connecting.pop(self.fileno, None)
-		#tasks.pop(self.task, None)
+		if hasattr(self, 'fileno'):
+			connections.pop(self.fileno, None)
+			connecting.pop(self.fileno, None)
 
 	
 
@@ -79,20 +77,18 @@ class connect:
 
 	def __call__(self, context):
 		""" Create a non-blocking socket and enqueue it for connection. """
-		# connect a socket
-		sock = socket.socket()
 		# do not set sock.timeout() it modifies blocking behavior
-		sock.setblocking(0)
 		# absolutely do not settimeout()! This also set's blocking.
+		sock = socket.socket()
+		sock.setblocking(0)
 		# do not linger on close, kernel will try to gracefully close in background
 		sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 0, 0))
 
 		# add socket to list of pending connections
+		# dont actually call connect() here, just enqueue it
 		context.fileno = sock.fileno()
 		context.sock = sock 
 		connecting[context.fileno] = context
-		#tasks[task] = context
-		# we dont actually call connect() here, just queue it
 		
 		# resolve the hostname only if not in cache
 		# TODO: DNS lookups block. Impliment the DNS protocol and do this concurrently as well. 
@@ -103,6 +99,7 @@ class connect:
 				ip = socket.gethostbyname(self.host)
 				dns_cache[self.host] = ip
 			
+			# set context	
 			context.address = (ip, self.port)
 	
 		# throw DNS errors
@@ -118,67 +115,46 @@ def connect_ex(context):
 	task = context.task
 
 	# Expect socket.error: 115, 'Operation now in progress'
-	try:
-		#sock.connect(context.address)
-		err = sock.connect_ex(context.address)
-
-	#except socket.error, socket.msg:
-	#	(err, errmsg) = socket.msg.args
-
-		# connected successfully
-		if err == 0 or err == errno.EISCONN:
-			if DEBUG: print "connection successful"
-			# move from connecting to connections
-			connections[fileno] = context
-			connecting.pop(fileno, None)
-			
-			# get and call next syscall to register with epoll
-			#syscall = task.send(None)
-			#syscall(task)
-			context.send(None)
-
-		# connection already in progress or would block
-		elif err == errno.EINPROGRESS or err == errno.EWOULDBLOCK:
-			if DEBUG: print "EINPROGRESS / EWOULDBLOCK"
-			pass
+	err = sock.connect_ex(context.address)
 	
-		# previous connection attempt has not completed
-		elif err == errno.EALREADY: 
-			if DEBUG: print "EALREADY"
-			pass
-
-		# not sure what to do with this yet
-		elif err == errno.ETIMEDOUT:
-			connecting.pop(fileno, None)
-			msg = "ConnectError [%s] Timeout while connecting" % (errno.errorcode[err])
-			if DEBUG: print msg
-			context.throw(ConnectError(msg))
-
-		else:
-			msg = "ConnectError [%s] Error while connecting" % (errno.errorcode[err])
-			if DEBUG: print msg
-			context.throw(ConnectError(msg))
-	
-	except StopIteration:
-		connections.pop(fileno, None)
+	# connected successfully
+	if err == 0 or err == errno.EISCONN:
+		if DEBUG: print "connection successful"
+		# move from connecting to connections
+		connections[fileno] = context
 		connecting.pop(fileno, None)
-		#tasks.pop(task, None)
-		sys.exit(1)
+		# advance the coroutine	
+		context.send(None)
 
-"""		## Windows errors ###
+	# connection already in progress or would block
+	elif err == errno.EINPROGRESS or err == errno.EWOULDBLOCK:
+		if DEBUG: print "EINPROGRESS / EWOULDBLOCK"
+		pass
 
-		# Connection already made
-		#elif err == errno.EISCONN:
-		#	pass
+	# previous connection attempt has not completed
+	elif err == errno.EALREADY: 
+		if DEBUG: print "EALREADY"
+		pass
 
-		#elif hassattr(errno, 'WSAEINVAL') and err == errno.WSAEINVAL:
-			# WSAEINVAL is windows equivelent of EALREADY
-			#pass
+	# not sure what to do with this yet
+	elif err == errno.ETIMEDOUT:
+		connecting.pop(fileno, None)
+		msg = "ConnectError [%s] Timeout while connecting" % (errno.errorcode[err])
+		if DEBUG: print msg
+		context.throw(ConnectError(msg))
 
-		else:
-			raise Exception("unhandled connection error: %s" % errmsg)
-			sys.exit(-1)
-"""
+	### Windows errors ###
+	#elif hassattr(errno, 'WSAEINVAL') and err == errno.WSAEINVAL:
+		# WSAEINVAL is windows equivelent of EALREADY
+		#pass
+
+	else:
+		msg = "ConnectError [%s] Error while connecting" % (errno.errorcode[err])
+		if DEBUG: print msg
+		context.throw(ConnectError(msg))
+	
+
+
 class read:
 	"""read system call"""
 	def __init__(self, nbytes=8196):
@@ -246,8 +222,6 @@ def run(taskgen):
 				task = taskgen.next()
 				context = Context(task)
 				context.send(None)
-				#syscall = task.send(None)
-				#syscall(task)
 			except StopIteration as ex:
 				# taskgen.next() threw StopIteration
 				done = True
@@ -262,6 +236,10 @@ def run(taskgen):
 		# get epoll events
 		events = epoll.poll(1)
 		for fileno, event in events:
+			
+			if fileno not in connections:
+				print "fileno %s not in connections. epoll event %s" % (fileno, event)
+
 			# get context
 			context = connections[fileno]
 			sock = context.sock
@@ -276,8 +254,6 @@ def run(taskgen):
 					# len zero read means EOF
 					if len(response) == 0:
 						# send response, get new opp
-						#syscall = task.send(context.response)
-						#syscall(task)
 						context.send(context.response)
 
 					else:
@@ -287,8 +263,6 @@ def run(taskgen):
 				elif event & select.EPOLLOUT:
 					byteswritten = sock.send(context.request)
 					if DEBUG: print fileno, "bytes written", byteswritten
-					#syscall = task.send(byteswritten)
-					#syscall(task)
 					context.send(byteswritten)
 
 				# connection closed
@@ -297,10 +271,7 @@ def run(taskgen):
 					epoll.unregister(fileno)
 					sock.close()
 					connections.pop(fileno, None)
-					#timeouts.pop(fileno, None)
 					# advance the coroutine
-					#syscall = task.send(None)
-					#syscall(task)
 					context.send(None)
 		
 				# throw unhandled states to task
@@ -315,61 +286,13 @@ def run(taskgen):
 				
 				# remote host closed connection
 				if err == errno.ECONNRESET or err == errno.ENOTCONN:
+					# pop but dont close an already closed connection
 					connections.pop(fileno, None)
 					epoll.unregister(fileno)
-					#timeouts.pop(fileno, None)
-					# dont close already closed connections
-				
 					context.throw(ResetError("ResetError [%s] %s" % (err, errmsg)))
-			
 				else:
 					context.throw(SockError("SockError [%s] %s" % (err, errmsg)))
 
-			# coroutine exited without closing connection
-			#except StopIteration as ex:
-			#	if DEBUG: print "StopIteration, removing task"
-				#tasks.pop(task, None)
-
-
-			# end epoll loop
-
-			#### TIMEOUT ####
-		
-			# check for stale connections periodically	
-			#now = time.time()
-			#if now - last_timeout_check > timeout_poll:
-				#last_timeout_check = now
-				# check each connecting or connected object
-				#for fileno, (duration, start) in timeouts.items():
-					#if DEBUG: print fileno, "timeout check"
-					#if now - start > duration:
-						#if DEBUG: print fileno, "timeout, closing"
-						# close connection
-						#sock, task = connections[fileno]
-						#task.throw(Exception('timeout'))
-						#close()(task)
-		
-
-
-if __name__=='__main__':
-
-	host = sys.argv[1]
-	count = int(sys.argv[2])
-
-	for i in xrange(count):
-		tasks.put(HTTP(host).run())
-
-	start = time.time()
-	run()
-	end = time.time()
-
-	# print statistics
-	sys.stderr.write('-- statistics --\n')
-	mb = float(bytes_read + bytes_written) / pow(1024,2)
-	sys.stderr.write("%i connections completed in %.2f seconds (%.2f per sec)\n" % (completed, end-start, completed/(end-start)) )
-	#sys.stderr.write("%i bytes read, %i bytes written\n" % (bytes_read, bytes_written) )
-	sys.stderr.write("%.4f MB data transferred (%.4f per sec)\n" % (mb, mb / (end-start)) )
-	sys.stderr.write("%i connections errored\n" % errored)
 
 """
 Notes

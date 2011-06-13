@@ -34,18 +34,18 @@ class HTTP(object):
 			yield connect(self.host, self.port, 5)
 			yield write(self.message)
 			response = yield read()
-			print '>', response[:15]
+			#print '>', response[:15]
 			yield close()
 			increment('Completed')
 		
 		except ConnectError:
 			increment('ConnectError')
 
-		except EpollError:
-			increment('EpollError')
+		#except EpollError:
+		#	increment('EpollError')
 
 		except DomainError:
-			increment('NameError')
+			increment('DomainError')
 		
 		except ResetError:
 			increment('ResetError')
