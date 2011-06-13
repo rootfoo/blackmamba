@@ -1,5 +1,5 @@
-from client import connect, read, write, close, run
-import sys
+from blackmamba import *
+import sys, time
 
 def save(response):
     import hashlib
@@ -9,6 +9,10 @@ def save(response):
         fh.write(response)
 
 
+stats = {}
+
+def increment(name):
+	stats[name] = stats.get(name,0) + 1
 
 class HTTP(object):
 	""" 
@@ -30,11 +34,27 @@ class HTTP(object):
 			yield connect(self.host, self.port, 5)
 			yield write(self.message)
 			response = yield read()
-			yield close()
 			print '>', response[:15]
+			yield close()
+			increment('Completed')
+		
+		except ConnectError:
+			increment('ConnectError')
 
-		except Exception as ex: 
-			print '>>', ex
+		except EpollError:
+			increment('EpollError')
+
+		except DomainError:
+			increment('NameError')
+		
+		except ResetError:
+			increment('ResetError')
+
+		except SockError:
+			increment('SockError')
+		
+		except TimeoutError:
+			increment('TimeoutError')
 
 
 def httpgen(host, count):
@@ -47,6 +67,14 @@ if __name__=='__main__':
 
 	host = sys.argv[1]
 	count = int(sys.argv[2])
-
+	
+	start = time.time()
 	run(httpgen(host, count))
+	end = time.time()
+
+	print '\n-- statistics --\n'
+	for k,v in stats.items():
+		print '%s : %s' % (k,v)
+
+	print "time : %.4f seconds" % (end-start)
 

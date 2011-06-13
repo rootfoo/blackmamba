@@ -9,22 +9,38 @@ DEBUG = True
 dns_cache = {}		# {host : ip}
 connecting = {}		# {fileno : context}
 connections = {}	# {fileno : context}
-tasks = {}			# {task : context}
+#tasks = {}			# {task : context}
 
 epoll = select.epoll()
-timeout_poll = 5 	# timeout pulling frequency in seconds
+#timeout_poll = 5 	# timeout pulling frequency in seconds
 maxcons = 1000
 
 class Context:
-	def __init__(self, task, sock, address, timeout):
+	def __init__(self, task):
 		self.task = task
-		self.sock = sock
-		self.fileno = sock.fileno()
-		self.address = address
-		self.timeout = timeout
-		self.last = time.time()
-		self.request = None
-		self.response = ""
+
+	def throw(self, error):
+		try:
+			self.task.throw(error)
+		except StopIteration as ex:
+			self.close()
+
+	def send(self, sendval=None):
+		try:
+			syscall = self.task.send(sendval)
+			syscall(self)
+			return True
+
+		except StopIteration as ex:
+			self.close()
+			return False
+
+	def close(self):
+		connections.pop(self.fileno, None)
+		connecting.pop(self.fileno, None)
+		#tasks.pop(self.task, None)
+
+	
 
 class TimeoutError(Exception):
 	pass
@@ -32,7 +48,7 @@ class TimeoutError(Exception):
 class ConnectError(Exception):
 	pass
 
-class NameError(Exception):
+class DomainError(Exception):
 	pass
 
 class ResetError(Exception):
@@ -55,8 +71,23 @@ class connect:
 		self.port = port
 		self.timeout = timeout
 
-	def __call__(self, task):
+	def __call__(self, context):
 		""" Create a non-blocking socket and enqueue it for connection. """
+		# connect a socket
+		sock = socket.socket()
+		# do not set sock.timeout() it modifies blocking behavior
+		sock.setblocking(0)
+		# absolutely do not settimeout()! This also set's blocking.
+		# do not linger on close, kernel will try to gracefully close in background
+		sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 0, 0))
+
+		# add socket to list of pending connections
+		context.fileno = sock.fileno()
+		context.sock = sock 
+		connecting[context.fileno] = context
+		#tasks[task] = context
+		# we dont actually call connect() here, just queue it
+		
 		# resolve the hostname only if not in cache
 		# TODO: DNS lookups block. Impliment the DNS protocol and do this concurrently as well. 
 		try:
@@ -66,31 +97,11 @@ class connect:
 				ip = socket.gethostbyname(self.host)
 				dns_cache[self.host] = ip
 			
-			# connect a socket
-			sock = socket.socket()
-			# do not set sock.timeout() it modifies blocking behavior
-			sock.setblocking(0)
-			# absolutely do not settimeout()! This also set's blocking.
-			# do not linger on close, kernel will try to gracefully close in background
-			sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 0, 0))
-
-			# add socket to list of pending connections
-			fileno = sock.fileno()
-			address = (ip, self.port)
-			context = Context(task, sock, address, self.timeout)
-			connecting[fileno] = context
-			tasks[task] = context
-
-			#address = (ip, self.port) 
-			#fileno = sock.fileno()
-			#connecting[fileno] = (sock, address, task)
-			#taskfile[task] = fileno
-			#timeouts[fileno] = (self.timeout, time.time())
-			# we dont actually call connect() here, just queue it
-		
-		# except DNS errors
+			context.address = (ip, self.port)
+	
+		# throw DNS errors
 		except socket.gaierror as ex:
-			task.throw(NameError("NameError [%s] %s" % (ex.args)))
+			context.throw(DomainError("DomainError [%s] %s" % (ex.args)))
 
 
 def connect_ex(context):
@@ -116,8 +127,9 @@ def connect_ex(context):
 			connecting.pop(fileno, None)
 			
 			# get and call next syscall to register with epoll
-			syscall = task.send(None)
-			syscall(task)
+			#syscall = task.send(None)
+			#syscall(task)
+			context.send(None)
 
 		# connection already in progress or would block
 		elif err == errno.EINPROGRESS or err == errno.EWOULDBLOCK:
@@ -134,17 +146,18 @@ def connect_ex(context):
 			connecting.pop(fileno, None)
 			msg = "ConnectError [%s] Timeout while connecting" % (errno.errorcode[err])
 			if DEBUG: print msg
-			task.throw(ConnectError(msg))
+			context.throw(ConnectError(msg))
 
 		else:
 			msg = "ConnectError [%s] Error while connecting" % (errno.errorcode[err])
 			if DEBUG: print msg
-			task.throw(ConnectError(msg))
+			context.throw(ConnectError(msg))
 	
 	except StopIteration:
 		connections.pop(fileno, None)
 		connecting.pop(fileno, None)
-		tasks.pop(task, None)
+		#tasks.pop(task, None)
+		sys.exit(1)
 
 """		## Windows errors ###
 
@@ -165,10 +178,10 @@ class read:
 	def __init__(self, nbytes=8196):
 		self.nbytes = nbytes # to be used as max amount to read, diff from read block size
 	
-	def __call__(self, task):
-		context = tasks[task]
+	def __call__(self, context):
 		fileno = context.fileno
-		
+		context.response = ""
+
 		try:
 			epoll.modify(fileno, select.EPOLLIN)
 		except IOError as ex:
@@ -182,8 +195,7 @@ class write:
 	def __init__(self, data):
 		self.data = data
 	
-	def __call__(self, task):
-		context = tasks[task]
+	def __call__(self, context):
 		fileno = context.fileno
 		context.request = self.data
 		
@@ -196,8 +208,7 @@ class write:
 			
 class close:
 	"""close system call"""
-	def __call__(self, task):
-		context = tasks[task]
+	def __call__(self, context):
 		fileno = context.fileno
 		context.sock.shutdown(socket.SHUT_RDWR)
 		
@@ -224,14 +235,15 @@ def run(taskgen):
 		
 		# connect new tasks if workload under max and tasks remain
 		if not done and (len(connections)+len(connecting) < maxcons):
-			try:
-				# get task; prime coroutine; call syscall
+			# get task; prime coroutine; call syscall
+			try:	
 				task = taskgen.next()
-				syscall = task.send(None)
-				syscall(task)
-
-			except StopIteration:
-				# task didnt yield syscall
+				context = Context(task)
+				context.send(None)
+				#syscall = task.send(None)
+				#syscall(task)
+			except StopIteration as ex:
+				# taskgen.next() threw StopIteration
 				done = True
 
 		#### CONNECT ####
@@ -258,8 +270,9 @@ def run(taskgen):
 					# len zero read means EOF
 					if len(response) == 0:
 						# send response, get new opp
-						syscall = task.send(context.response)
-						syscall(task)
+						#syscall = task.send(context.response)
+						#syscall(task)
+						context.send(context.response)
 
 					else:
 						context.response += response
@@ -268,8 +281,9 @@ def run(taskgen):
 				elif event & select.EPOLLOUT:
 					byteswritten = sock.send(context.request)
 					if DEBUG: print fileno, "bytes written", byteswritten
-					syscall = task.send(byteswritten)
-					syscall(task)
+					#syscall = task.send(byteswritten)
+					#syscall(task)
+					context.send(byteswritten)
 
 				# connection closed
 				elif event & select.EPOLLHUP:
@@ -279,13 +293,14 @@ def run(taskgen):
 					connections.pop(fileno, None)
 					#timeouts.pop(fileno, None)
 					# advance the coroutine
-					syscall = task.send(None)
-					syscall(task)
+					#syscall = task.send(None)
+					#syscall(task)
+					context.send(None)
 		
 				# throw unhandled states to task
 				else:
 					# includes select.EPOLLERR
-					task.throw(EpollError("EpollError [%s]" % event))
+					context.throw(EpollError("EpollError [%s]" % event))
 					sys.exit(1)
 
 			# throw any socket/epoll exceptions not handled by other methods
@@ -299,15 +314,15 @@ def run(taskgen):
 					#timeouts.pop(fileno, None)
 					# dont close already closed connections
 				
-					task.throw(ResetError("ResetError [%s] %s" % (err, errmsg)))
+					context.throw(ResetError("ResetError [%s] %s" % (err, errmsg)))
 			
 				else:
-					task.throw(SockError("SockError [%s] %s" % (err, errmsg)))
+					context.throw(SockError("SockError [%s] %s" % (err, errmsg)))
 
 			# coroutine exited without closing connection
-			except StopIteration as ex:
-				if DEBUG: print "StopIteration, removing task"
-				tasks.pop(task, None)
+			#except StopIteration as ex:
+			#	if DEBUG: print "StopIteration, removing task"
+				#tasks.pop(task, None)
 
 
 			# end epoll loop
