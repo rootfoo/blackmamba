@@ -36,11 +36,10 @@ class Context:
 		try:
 			syscall = self.task.send(sendval)
 			syscall(self)
-			return True
 
 		except StopIteration as ex:
-			self.close()
-			return False
+			#self.close()
+			pass
 
 	def close(self):
 		"""Convenience method to remove a task from the run loop"""
@@ -121,53 +120,6 @@ class connect:
 			epoll.register(context.fileno, select.EPOLLOUT)
 
 
-def connect_ex(context):
-	"""try to connect a non-blocking socket. Handle expected errors"""
-
-	sock = context.sock
-	fileno = context.fileno
-	task = context.task
-
-	# Expect socket.error: 115, 'Operation now in progress'
-	err = sock.connect_ex(context.address)
-	
-	# connected successfully
-	if err == 0 or err == errno.EISCONN:
-		if DEBUG: print "connection successful"
-		# move from connecting to connections
-		connections[fileno] = context
-		connecting.pop(fileno, None)
-		# advance the coroutine	
-		context.send(None)
-
-	# connection already in progress or would block
-	elif err == errno.EINPROGRESS or err == errno.EWOULDBLOCK:
-		if DEBUG: print "EINPROGRESS / EWOULDBLOCK"
-		pass
-
-	# previous connection attempt has not completed
-	elif err == errno.EALREADY: 
-		if DEBUG: print "EALREADY"
-		pass
-
-	# not sure what to do with this yet
-	elif err == errno.ETIMEDOUT:
-		connecting.pop(fileno, None)
-		msg = "ConnectError [%s] Timeout while connecting" % (errno.errorcode[err])
-		if DEBUG: print msg
-		context.throw(ConnectError(msg))
-
-	### Windows errors ###
-	#elif hassattr(errno, 'WSAEINVAL') and err == errno.WSAEINVAL:
-		# WSAEINVAL is windows equivelent of EALREADY
-		#pass
-
-	else:
-		msg = "ConnectError [%s] Error while connecting" % (errno.errorcode[err])
-		if DEBUG: print msg
-		context.throw(ConnectError(msg))
-	
-
 
 class read:
 	"""read system call"""
@@ -188,6 +140,7 @@ class read:
 		finally:
 			if DEBUG: print fileno, 'set epoll read'
 
+
 class write:
 	"""write system call"""
 	def __init__(self, data):
@@ -205,7 +158,8 @@ class write:
 			epoll.register(fileno, select.EPOLLOUT)
 		finally:
 			if DEBUG: print fileno, 'set epoll write'
-			
+
+
 class close:
 	"""close system call"""
 	def __call__(self, context):
@@ -247,11 +201,6 @@ def run(taskgen):
 				# taskgen.next() threw StopIteration
 				done = True
 
-		#### CONNECT ####
-		
-		#for context in connecting.values():
-		#	connect_ex(context)
-
 		#### READ, WRITE, CLOSE ####
 
 		# get epoll events
@@ -285,10 +234,10 @@ def run(taskgen):
 					# first check that connect() completed successfully
 					err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
 					if err:
+						if DEBUG: print fileno, errno.errorcode[err], "EPOLLOUT"
 						context.throw(ConnectError("ConnectError [%s] connection failed" % errno.errorcode[err]))
-						# failed connections are automatically removed; no need to unregister here
-						#epoll.unregister(fileno)
-						connections.pop(fileno, None)
+						# epoll automatically modifies failed connections to EPOLLHUP; no need to unregister here
+						#connections.pop(fileno, None)
 					elif not context.request:
 						if DEBUG: print fileno, "connection successful"
 						context.send(None)
@@ -299,7 +248,7 @@ def run(taskgen):
 
 				# connection closed
 				if event & select.EPOLLHUP:
-					if DEBUG : print fileno, "connection closed"
+					if DEBUG: print fileno, "EPOLLHUP, connection closed"
 					
 					epoll.unregister(fileno)
 					connections.pop(fileno, None)
