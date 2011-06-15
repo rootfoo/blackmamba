@@ -10,7 +10,7 @@ connecting = {}		# {fileno : context}
 connections = {}	# {fileno : context}
 
 epoll = select.epoll()
-maxcons = 2000
+maxcons = 1000
 
 class Context:
 	def __init__(self, task):
@@ -40,10 +40,8 @@ class Context:
 
 	def close(self):
 		"""Convenience method to remove a task from the run loop"""
-		if hasattr(self, 'fileno'):
-			connections.pop(self.fileno, None)
-			connecting.pop(self.fileno, None)
-
+		if hasattr(self, 'fileno') and self.fileno in connections:
+			close()(self)
 	
 
 class TimeoutError(Exception):
@@ -83,7 +81,7 @@ class connect:
 		sock.setblocking(0)
 		# do not linger on close, kernel will try to gracefully close in background
 		sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 0, 0))
-
+		sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 		# add socket to list of pending connections
 		# dont actually call connect() here, just enqueue it
 		context.fileno = sock.fileno()
@@ -157,16 +155,18 @@ def connect_ex(context):
 
 class read:
 	"""read system call"""
-	def __init__(self, nbytes=8196):
-		self.nbytes = nbytes # to be used as max amount to read, diff from read block size
-	
+	def __init__(self):
+		pass
+
 	def __call__(self, context):
 		fileno = context.fileno
 		context.response = ""
 
 		try:
+			#epoll.modify(fileno, select.EPOLLIN | select.EPOLLET)
 			epoll.modify(fileno, select.EPOLLIN)
 		except IOError as ex:
+			#epoll.register(fileno, select.EPOLLIN | select.EPOLLET)
 			epoll.register(fileno, select.EPOLLIN)
 			#responses[fileno] = ''
 		finally:
@@ -182,8 +182,10 @@ class write:
 		context.request = self.data
 		
 		try:
+			#epoll.modify(fileno, select.EPOLLOUT | select.EPOLLET)
 			epoll.modify(fileno, select.EPOLLOUT)
 		except IOError as ex:
+			#epoll.register(fileno, select.EPOLLOUT | select.EPOLLET)
 			epoll.register(fileno, select.EPOLLOUT)
 		finally:
 			if DEBUG: print fileno, 'set epoll write'
@@ -195,8 +197,11 @@ class close:
 		context.sock.shutdown(socket.SHUT_RDWR)
 		
 		try:
+			# set as 0 for level or EPOLLET for edge triggered
+			#epoll.modify(fileno, select.EPOLLET)
 			epoll.modify(fileno, 0)
 		except IOError as ex:
+			#epoll.register(fileno, select.EPOLLET) # may never be reached?
 			epoll.register(fileno, 0) # may never be reached?
 		finally:
 			if DEBUG: print fileno, 'set epoll close'
@@ -212,13 +217,13 @@ def run(taskgen):
 	while connections or connecting or not done:
 
 		if DEBUG: print "--loop--"
-		
+		print connections.keys()
 		#### ADD TASK ####
 		
 		# connect new tasks if workload under max and tasks remain
 		if not done and (len(connections)+len(connecting) < maxcons):
-			# get task; prime coroutine; call syscall
-			try:	
+			try:
+				# get task; prime coroutine; call syscall
 				task = taskgen.next()
 				context = Context(task)
 				context.send(None)
@@ -238,7 +243,7 @@ def run(taskgen):
 		for fileno, event in events:
 			
 			if fileno not in connections:
-				print "fileno %s not in connections. epoll event %s" % (fileno, event)
+				print "fileno %s not in connections. epoll event %x" % (fileno, event)
 
 			# get context
 			context = connections[fileno]
@@ -248,14 +253,13 @@ def run(taskgen):
 			try:
 				# read response
 				if event & select.EPOLLIN:
-					response = sock.recv(8192)
+					response = sock.recv(8096)
 					if DEBUG: print fileno, "bytes read", len(response)
 					
 					# len zero read means EOF
 					if len(response) == 0:
 						# send response, get new opp
 						context.send(context.response)
-
 					else:
 						context.response += response
 				
