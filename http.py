@@ -37,25 +37,24 @@ class HTTP(object):
 			#print '>', response[:15]
 			yield close()
 			increment('Completed')
-		
-		except ConnectError:
-			increment('ConnectError')
 
-		#except EpollError:
-		#	increment('EpollError')
-
-		except DomainError:
-			increment('DomainError')
-		
-		except ResetError:
+		except ResetError as ex:
 			increment('ResetError')
 
-		except SockError:
-			increment('SockError')
-		
-		except TimeoutError:
-			increment('TimeoutError')
+		except ConnectError as ex:
+			increment('ConnectError')
 
+		except EpollError as ex:
+			increment('EpollError')
+
+		except DomainError as ex:
+			increment('DomainError')
+
+		except SockError as ex:
+			increment('SockError')
+
+		except TimeoutError as ex:
+			increment('TimeoutError')
 
 def httpgen(host, count):
 

@@ -3,7 +3,7 @@ import sys, struct
 import time
 import errno
 
-DEBUG = True
+DEBUG = False
 
 dns_cache = {}		# {host : ip}
 connecting = {}		# {fileno : context}
@@ -19,13 +19,17 @@ class Context:
 		task is the only required attribute. All others are set dynamically.
 		"""
 		self.task = task
+		self.request = None
 
 	def throw(self, error):
 		"""A convenience method to pass exceptions to a task"""
 		try:
 			self.task.throw(error)
 		except StopIteration as ex:
-			self.close()
+			pass
+		#except Exception as ex:
+		#	if DEBUG: print self.fileno, "catching unhandled exception"
+		#	if DEBUG: print ex
 
 	def send(self, sendval=None):
 		"""A convenience method to advance a task (coroutine) to it's next state"""
@@ -86,7 +90,7 @@ class connect:
 		# dont actually call connect() here, just enqueue it
 		context.fileno = sock.fileno()
 		context.sock = sock 
-		connecting[context.fileno] = context
+		#connecting[context.fileno] = context
 		
 		# resolve the hostname only if not in cache
 		# TODO: DNS lookups block. Impliment the DNS protocol and do this concurrently as well. 
@@ -103,6 +107,18 @@ class connect:
 		# throw DNS errors
 		except socket.gaierror as ex:
 			context.throw(DomainError("DomainError [%s] %s" % (ex.args)))
+
+		# connect but expect EINPROGRESS
+		err = sock.connect_ex(context.address)
+		if err != errno.EINPROGRESS:
+			msg = "ConnectError [%s]" % (errno.errorcode[err])
+			if DEBUG: print msg
+			context.throw(ConnectError(msg))
+		else:
+			# register with epoll for write. 
+			# when it has connected epoll will report a ready-to-write event
+			connections[context.fileno] = context
+			epoll.register(context.fileno, select.EPOLLOUT)
 
 
 def connect_ex(context):
@@ -216,8 +232,8 @@ def run(taskgen):
 
 	while connections or connecting or not done:
 
-		if DEBUG: print "--loop--"
-		print connections.keys()
+		if DEBUG: print "-- loop(%i) --" % len(connections)
+
 		#### ADD TASK ####
 		
 		# connect new tasks if workload under max and tasks remain
@@ -233,13 +249,13 @@ def run(taskgen):
 
 		#### CONNECT ####
 		
-		for context in connecting.values():
-			connect_ex(context)
+		#for context in connecting.values():
+		#	connect_ex(context)
 
 		#### READ, WRITE, CLOSE ####
 
 		# get epoll events
-		events = epoll.poll(1)
+		events = epoll.poll(2)
 		for fileno, event in events:
 			
 			if fileno not in connections:
@@ -251,6 +267,7 @@ def run(taskgen):
 			task = context.task
 
 			try:
+		
 				# read response
 				if event & select.EPOLLIN:
 					response = sock.recv(8096)
@@ -265,34 +282,47 @@ def run(taskgen):
 				
 				# send request
 				elif event & select.EPOLLOUT:
-					byteswritten = sock.send(context.request)
-					if DEBUG: print fileno, "bytes written", byteswritten
-					context.send(byteswritten)
+					# first check that connect() completed successfully
+					err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+					if err:
+						context.throw(ConnectError("ConnectError [%s] connection failed" % errno.errorcode[err]))
+						# failed connections are automatically removed; no need to unregister here
+						#epoll.unregister(fileno)
+						connections.pop(fileno, None)
+					elif not context.request:
+						if DEBUG: print fileno, "connection successful"
+						context.send(None)
+					else:
+						byteswritten = sock.send(context.request)
+						if DEBUG: print fileno, "bytes written", byteswritten
+						context.send(byteswritten)
 
 				# connection closed
-				elif event & select.EPOLLHUP:
-					if DEBUG: print fileno, "connection closed"
+				if event & select.EPOLLHUP:
+					if DEBUG : print fileno, "connection closed"
+					
 					epoll.unregister(fileno)
-					sock.close()
 					connections.pop(fileno, None)
+					sock.close()
 					# advance the coroutine
 					context.send(None)
-		
+	
 				# throw unhandled states to task
-				else:
+				#else:
 					# includes select.EPOLLERR
-					context.throw(EpollError("EpollError [%s]" % event))
-					sys.exit(1)
+				#	context.throw(EpollError("EpollError [%s]" % event))
+				#	sys.exit(1)
 
 			# throw any socket/epoll exceptions not handled by other methods
 			except socket.error, socket.msg:
 				(err, errmsg) = socket.msg.args
 				
+				connections.pop(fileno, None)
+				epoll.unregister(fileno)
+			
 				# remote host closed connection
 				if err == errno.ECONNRESET or err == errno.ENOTCONN:
 					# pop but dont close an already closed connection
-					connections.pop(fileno, None)
-					epoll.unregister(fileno)
 					context.throw(ResetError("ResetError [%s] %s" % (err, errmsg)))
 				else:
 					context.throw(SockError("SockError [%s] %s" % (err, errmsg)))
