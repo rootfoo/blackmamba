@@ -3,12 +3,10 @@ import sys, struct
 import time
 import errno
 
-DEBUG = False
+DEBUG = True
 
 dns_cache = {}		# {host : ip}
-connecting = {}		# {fileno : context}
 connections = {}	# {fileno : context}
-
 epoll = select.epoll()
 maxcons = 1000
 
@@ -27,9 +25,7 @@ class Context:
 			self.task.throw(error)
 		except StopIteration as ex:
 			pass
-		#except Exception as ex:
-		#	if DEBUG: print self.fileno, "catching unhandled exception"
-		#	if DEBUG: print ex
+
 
 	def send(self, sendval=None):
 		"""A convenience method to advance a task (coroutine) to it's next state"""
@@ -38,14 +34,10 @@ class Context:
 			syscall(self)
 
 		except StopIteration as ex:
-			#self.close()
 			pass
 
-	def close(self):
-		"""Convenience method to remove a task from the run loop"""
-		if hasattr(self, 'fileno') and self.fileno in connections:
-			close()(self)
-	
+
+
 class ConnectionError(Exception):
 	pass
 
@@ -85,14 +77,15 @@ class connect:
 		sock = socket.socket()
 		sock.setblocking(0)
 		# do not linger on close, kernel will try to gracefully close in background
-		sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 0, 0))
+		#sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 0, 0))
 		sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 		# add socket to list of pending connections
 		# dont actually call connect() here, just enqueue it
 		context.fileno = sock.fileno()
 		context.sock = sock 
-		#connecting[context.fileno] = context
-		
+		context.timeout = self.timeout
+		context.atime = time.time()
+
 		# resolve the hostname only if not in cache
 		# TODO: DNS lookups block. Impliment the DNS protocol and do this concurrently as well. 
 		try:
@@ -198,21 +191,21 @@ def run(taskgen):
 	"""
 	done = False
 
-	while connections or connecting or not done:
+	while connections or not done:
 
 		if DEBUG: print "-- loop(%i) --" % len(connections)
 
 		#### ADD TASK ####
 		
 		# connect new tasks if workload under max and tasks remain
-		if not done and (len(connections)+len(connecting) < maxcons):
+		if not done and len(connections) < maxcons:
 			try:
 				# get task; prime coroutine; call syscall
 				task = taskgen.next()
 				context = Context(task)
 				context.send(None)
 			except StopIteration as ex:
-				# taskgen.next() threw StopIteration
+				# taskgen.next() threw StopIteration (not context.send)
 				done = True
 
 		#### READ, WRITE, CLOSE ####
@@ -228,7 +221,8 @@ def run(taskgen):
 			context = connections[fileno]
 			sock = context.sock
 			task = context.task
-
+			context.atime = time.time()
+			
 			try:
 		
 				# read response
@@ -252,6 +246,7 @@ def run(taskgen):
 						context.throw(ConnectError("ConnectError [%s] connection failed" % errno.errorcode[err]))
 						# epoll automatically modifies failed connections to EPOLLHUP; no need to unregister here
 						#connections.pop(fileno, None)
+						epoll.unregister(fileno)
 					elif not context.request:
 						if DEBUG: print fileno, "connection successful"
 						context.send(None)
@@ -280,7 +275,7 @@ def run(taskgen):
 			except socket.error, socket.msg:
 				(err, errmsg) = socket.msg.args
 
-				print fileno, err, errmsg
+				if DEBUG: print fileno, err, errmsg
 				connections.pop(fileno, None)
 				epoll.unregister(fileno)
 			
@@ -291,7 +286,22 @@ def run(taskgen):
 				else:
 					context.throw(SockError("SockError [%s] %s" % (err, errmsg)))
 
+		# for/else
+		# else epoll for-loop had no events. Let's check connection states.
+		else:
+			now = time.time()
+			for fileno,context in connections.items():
+				delta = now - context.atime
+				if delta > context.timeout:
+					msg = "TimeoutError no connection activity for %.3f seconds" % delta
+					if DEBUG: print fileno, msg
+					close()(context)
+					context.throw(TimeoutError(msg))
 
+				if DEBUG:
+					err = context.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+					if err:
+						print fileno, "connection state", errno.errorcode[err]
 """
 Notes
 

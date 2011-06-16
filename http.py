@@ -41,6 +41,8 @@ class HTTP(object):
 		except ConnectionError as ex:
 			increment(ex.__class__.__name__)
 
+		except Exception as ex:
+			print "EXCEPTION", ex
 
 
 def httpgen(host, count):
