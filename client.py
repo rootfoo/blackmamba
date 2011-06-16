@@ -46,23 +46,25 @@ class Context:
 		if hasattr(self, 'fileno') and self.fileno in connections:
 			close()(self)
 	
-
-class TimeoutError(Exception):
+class ConnectionError(Exception):
 	pass
 
-class ConnectError(Exception):
+class TimeoutError(ConnectionError):
 	pass
 
-class DomainError(Exception):
+class ConnectError(ConnectionError):
 	pass
 
-class ResetError(Exception):
+class DomainError(ConnectionError):
+	pass
+
+class ResetError(ConnectionError):
 	pass
 	
-class SockError(Exception):
+class SockError(ConnectionError):
 	pass
 
-class EpollError(Exception):
+class ClosedError(ConnectionError):
 	pass
 
 
@@ -100,25 +102,27 @@ class connect:
 				ip = socket.gethostbyname(self.host)
 				dns_cache[self.host] = ip
 			
-			# set context	
+			# connect but expect EINPROGRESS
 			context.address = (ip, self.port)
+			err = sock.connect_ex(context.address)
+			msg = "connecting... [%s]" % errno.errorcode[err]
+			if DEBUG: print context.fileno, msg
+			
+			if err != errno.EINPROGRESS:
+				msg = "ConnectError [%s]" % (errno.errorcode[err])
+				if DEBUG: print context.fileno, msg
+				context.throw(ConnectError(msg))
+			else:
+				# register with epoll for write. 
+				# when it has connected epoll will report a ready-to-write event
+				connections[context.fileno] = context
+				epoll.register(context.fileno, select.EPOLLOUT)
 	
 		# throw DNS errors
 		except socket.gaierror as ex:
-			context.throw(DomainError("DomainError [%s] %s" % (ex.args)))
-
-		# connect but expect EINPROGRESS
-		err = sock.connect_ex(context.address)
-		if err != errno.EINPROGRESS:
-			msg = "ConnectError [%s]" % (errno.errorcode[err])
-			if DEBUG: print msg
-			context.throw(ConnectError(msg))
-		else:
-			# register with epoll for write. 
-			# when it has connected epoll will report a ready-to-write event
-			connections[context.fileno] = context
-			epoll.register(context.fileno, select.EPOLLOUT)
-
+			msg = "DomainError [%s] %s" % (ex.args)
+			if DEBUG: print context.fileno, msg
+			context.throw(DomainError(msg))
 
 
 class read:
@@ -133,12 +137,14 @@ class read:
 		try:
 			#epoll.modify(fileno, select.EPOLLIN | select.EPOLLET)
 			epoll.modify(fileno, select.EPOLLIN)
+			msg = 'set epoll read'
+
 		except IOError as ex:
-			#epoll.register(fileno, select.EPOLLIN | select.EPOLLET)
-			epoll.register(fileno, select.EPOLLIN)
-			#responses[fileno] = ''
+			msg = "ClosedError: Read failed; socket already closed"
+			context.throw(ClosedError(msg)) 
+
 		finally:
-			if DEBUG: print fileno, 'set epoll read'
+			if DEBUG: print fileno, msg
 
 
 class write:
@@ -153,11 +159,14 @@ class write:
 		try:
 			#epoll.modify(fileno, select.EPOLLOUT | select.EPOLLET)
 			epoll.modify(fileno, select.EPOLLOUT)
+			msg = 'set epoll write'
+
 		except IOError as ex:
-			#epoll.register(fileno, select.EPOLLOUT | select.EPOLLET)
-			epoll.register(fileno, select.EPOLLOUT)
+			msg = "ClosedError: Write failed; Socket already closed"
+			context.throw(ClosedError(msg)) 
+		
 		finally:
-			if DEBUG: print fileno, 'set epoll write'
+			if DEBUG: print fileno, msg
 
 
 class close:
@@ -170,11 +179,16 @@ class close:
 			# set as 0 for level or EPOLLET for edge triggered
 			#epoll.modify(fileno, select.EPOLLET)
 			epoll.modify(fileno, 0)
+			msg = "set epoll close"
+		
 		except IOError as ex:
 			#epoll.register(fileno, select.EPOLLET) # may never be reached?
-			epoll.register(fileno, 0) # may never be reached?
+			#epoll.register(fileno, 0) # may never be reached?
+			msg = "ConnectionError: IOError while closing"
+			context.throw(ConnectionError(msg))
+		
 		finally:
-			if DEBUG: print fileno, 'set epoll close'
+			if DEBUG: print fileno, msg
 	
 
 
@@ -247,7 +261,7 @@ def run(taskgen):
 						context.send(byteswritten)
 
 				# connection closed
-				if event & select.EPOLLHUP:
+				elif event & select.EPOLLHUP:
 					if DEBUG: print fileno, "EPOLLHUP, connection closed"
 					
 					epoll.unregister(fileno)
@@ -265,7 +279,8 @@ def run(taskgen):
 			# throw any socket/epoll exceptions not handled by other methods
 			except socket.error, socket.msg:
 				(err, errmsg) = socket.msg.args
-				
+
+				print fileno, err, errmsg
 				connections.pop(fileno, None)
 				epoll.unregister(fileno)
 			

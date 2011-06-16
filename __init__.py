@@ -1,2 +1,2 @@
 from client import run, connect, read, write, close
-from client import ConnectError, EpollError, DomainError, ResetError, SockError, TimeoutError
+from client import ConnectionError, ConnectError, ClosedError, DomainError, ResetError, SockError, TimeoutError

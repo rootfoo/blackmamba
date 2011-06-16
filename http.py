@@ -38,23 +38,10 @@ class HTTP(object):
 			yield close()
 			increment('Completed')
 
-		except ResetError as ex:
-			increment('ResetError')
+		except ConnectionError as ex:
+			increment(ex.__class__.__name__)
 
-		except ConnectError as ex:
-			increment('ConnectError')
 
-		except EpollError as ex:
-			increment('EpollError')
-
-		except DomainError as ex:
-			increment('DomainError')
-
-		except SockError as ex:
-			increment('SockError')
-
-		except TimeoutError as ex:
-			increment('TimeoutError')
 
 def httpgen(host, count):
 
