@@ -1,4 +1,5 @@
 from blackmamba import *
+from blackmamba.client import statistics as stats
 import sys, time
 
 def save(response):
@@ -8,11 +9,6 @@ def save(response):
     with open(name, 'wb') as fh: 
         fh.write(response)
 
-
-stats = {}
-
-def increment(name):
-	stats[name] = stats.get(name,0) + 1
 
 class HTTP(object):
 	""" 
@@ -30,19 +26,11 @@ class HTTP(object):
 		A coroutine to define the read/write interation with the target host.
 		Every read/write must yield.
 		"""
-		try:
-			yield connect(self.host, self.port, 5)
-			yield write(self.message)
-			response = yield read()
-			#print '>', response[:15]
-			yield close()
-			increment('Completed')
-
-		except ConnectionError as ex:
-			increment(ex.__class__.__name__)
-
-		except Exception as ex:
-			print "EXCEPTION", ex
+		yield connect(self.host, self.port, 5)
+		yield write(self.message)
+		response = yield read()
+		#print '>', response[:15]
+		yield close()
 
 
 def httpgen(host, count):

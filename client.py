@@ -7,6 +7,7 @@ DEBUG = True
 
 dns_cache = {}		# {host : ip}
 connections = {}	# {fileno : context}
+statistics = {}		# {Error : count}
 epoll = select.epoll()
 maxcons = 1000
 
@@ -23,9 +24,14 @@ class Context:
 		"""A convenience method to pass exceptions to a task"""
 		try:
 			self.task.throw(error)
+
 		except StopIteration as ex:
 			pass
-
+		
+		except ConnectionError as ex: 
+			# task didnt except error, add to statistics and ignore
+			name = ex.__class__.__name__
+			statistics[name] = statistics.get(name,0) + 1
 
 	def send(self, sendval=None):
 		"""A convenience method to advance a task (coroutine) to it's next state"""
@@ -34,6 +40,8 @@ class Context:
 			syscall(self)
 
 		except StopIteration as ex:
+			name = "Completed"
+			statistics[name] = statistics.get(name,0) + 1
 			pass
 
 
@@ -165,23 +173,21 @@ class write:
 class close:
 	"""close system call"""
 	def __call__(self, context):
-		fileno = context.fileno
-		context.sock.shutdown(socket.SHUT_RDWR)
 		
 		try:
+			context.sock.shutdown(socket.SHUT_RDWR)
 			# set as 0 for level or EPOLLET for edge triggered
 			#epoll.modify(fileno, select.EPOLLET)
-			epoll.modify(fileno, 0)
+			epoll.modify(context.fileno, 0)
 			msg = "set epoll close"
 		
-		except IOError as ex:
-			#epoll.register(fileno, select.EPOLLET) # may never be reached?
-			#epoll.register(fileno, 0) # may never be reached?
-			msg = "ConnectionError: IOError while closing"
+		except socket.error as ex:
+			err = context.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+			msg = "ConnectionError during close [%s]" % errno.errorcode[err]
 			context.throw(ConnectionError(msg))
 		
 		finally:
-			if DEBUG: print fileno, msg
+			if DEBUG: print context.fileno, msg
 	
 
 
@@ -198,7 +204,7 @@ def run(taskgen):
 		#### ADD TASK ####
 		
 		# connect new tasks if workload under max and tasks remain
-		if not done and len(connections) < maxcons:
+		while not done and len(connections) < maxcons:
 			try:
 				# get task; prime coroutine; call syscall
 				task = taskgen.next()
@@ -211,7 +217,7 @@ def run(taskgen):
 		#### READ, WRITE, CLOSE ####
 
 		# get epoll events
-		events = epoll.poll(2)
+		events = epoll.poll(1)
 		for fileno, event in events:
 			
 			if fileno not in connections:
