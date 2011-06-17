@@ -3,7 +3,7 @@ import sys, struct
 import time
 import errno
 
-DEBUG = True
+DEBUG = False
 
 dns_cache = {}		# {host : ip}
 connections = {}	# {fileno : context}
@@ -73,7 +73,7 @@ class connect:
 	connect system call. 
 	Queue the task for connection but doesn't actuall call connect() which blocks
 	"""
-	def __init__(self, host, port, timeout=5):
+	def __init__(self, host, port, timeout=30):
 		self.host = host
 		self.port = port
 		self.timeout = timeout
@@ -175,17 +175,17 @@ class close:
 	def __call__(self, context):
 		
 		try:
+			msg = "set epoll close"
 			context.sock.shutdown(socket.SHUT_RDWR)
 			# set as 0 for level or EPOLLET for edge triggered
 			#epoll.modify(fileno, select.EPOLLET)
 			epoll.modify(context.fileno, 0)
-			msg = "set epoll close"
 		
-		except socket.error as ex:
-			err = context.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-			msg = "ConnectionError during close [%s]" % errno.errorcode[err]
+		except socket.error, socket.msg:
+			(err, errmsg) = socket.msg.args
+			msg = "ConnectionError during close [%s] %s" % (err, errmsg)
 			context.throw(ConnectionError(msg))
-		
+
 		finally:
 			if DEBUG: print context.fileno, msg
 	
@@ -297,17 +297,21 @@ def run(taskgen):
 		else:
 			now = time.time()
 			for fileno,context in connections.items():
+				
 				delta = now - context.atime
-				if delta > context.timeout:
+				err = context.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+				
+				if err:
+					if DEBUG: print fileno, "connection state", errno.errorcode[err]
+				
+				elif delta > context.timeout:
 					msg = "TimeoutError no connection activity for %.3f seconds" % delta
 					if DEBUG: print fileno, msg
 					close()(context)
 					context.throw(TimeoutError(msg))
 
-				if DEBUG:
-					err = context.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-					if err:
-						print fileno, "connection state", errno.errorcode[err]
+
+
 """
 Notes
 
