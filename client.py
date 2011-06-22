@@ -2,14 +2,18 @@ import socket, select
 import sys, struct
 import time
 import errno
+import ssl
 
-DEBUG = False
+DEBUG = True
+VERBOSE = True
 
 dns_cache = {}		# {host : ip}
 connections = {}	# {fileno : context}
 statistics = {}		# {Error : count}
 epoll = select.epoll()
 maxcons = 1000
+current = None
+
 
 class Context:
 	def __init__(self, task):
@@ -19,13 +23,16 @@ class Context:
 		"""
 		self.task = task
 		self.request = None
+		self.tracelog = []
 
 	def throw(self, error):
 		"""A convenience method to pass exceptions to a task"""
 		try:
+			self.log(error)
 			self.task.throw(error)
 
 		except StopIteration as ex:
+			self.log('StopIteration')
 			pass
 		
 		except ConnectionError as ex: 
@@ -42,9 +49,12 @@ class Context:
 		except StopIteration as ex:
 			name = "Completed"
 			statistics[name] = statistics.get(name,0) + 1
-			pass
+			self.log(name)
 
-
+	def log(self, msg):
+		"""method to log debugging messages associated with a fileno"""
+		self.tracelog.append(msg)
+		if VERBOSE: print "[%i] %s" % (self.fileno, msg)
 
 class ConnectionError(Exception):
 	pass
@@ -67,22 +77,32 @@ class SockError(ConnectionError):
 class ClosedError(ConnectionError):
 	pass
 
+class EpollError(Exception):
+	pass
+
 
 class connect:
 	"""
 	connect system call. 
 	Queue the task for connection but doesn't actuall call connect() which blocks
 	"""
-	def __init__(self, host, port, timeout=30):
+	def __init__(self, host, port, timeout=30, ssl=False):
 		self.host = host
 		self.port = port
 		self.timeout = timeout
+		self.ssl = ssl
 
 	def __call__(self, context):
 		""" Create a non-blocking socket and enqueue it for connection. """
 		# do not set sock.timeout() it modifies blocking behavior
 		# absolutely do not settimeout()! This also set's blocking.
-		sock = socket.socket()
+		s = socket.socket()
+	
+		if self.ssl:
+			sock = ssl.wrap_socket(s)
+		else:
+			sock = s
+		
 		sock.setblocking(0)
 		# do not linger on close, kernel will try to gracefully close in background
 		#sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 0, 0))
@@ -106,12 +126,12 @@ class connect:
 			# connect but expect EINPROGRESS
 			context.address = (ip, self.port)
 			err = sock.connect_ex(context.address)
-			msg = "connecting... [%s]" % errno.errorcode[err]
-			if DEBUG: print context.fileno, msg
 			
+			# for debugging
+			context.log("connecting... [%s]" % errno.errorcode[err])
+
 			if err != errno.EINPROGRESS:
 				msg = "ConnectError [%s]" % (errno.errorcode[err])
-				if DEBUG: print context.fileno, msg
 				context.throw(ConnectError(msg))
 			else:
 				# register with epoll for write. 
@@ -122,7 +142,6 @@ class connect:
 		# throw DNS errors
 		except socket.gaierror as ex:
 			msg = "DomainError [%s] %s" % (ex.args)
-			if DEBUG: print context.fileno, msg
 			context.throw(DomainError(msg))
 
 
@@ -132,20 +151,16 @@ class read:
 		pass
 
 	def __call__(self, context):
-		fileno = context.fileno
 		context.response = ""
-
+		
 		try:
+			context.log('read, setting epoll for EPOLLIN')
 			#epoll.modify(fileno, select.EPOLLIN | select.EPOLLET)
-			epoll.modify(fileno, select.EPOLLIN)
-			msg = 'set epoll read'
-
+			epoll.modify(context.fileno, select.EPOLLIN)
+		
 		except IOError as ex:
 			msg = "ClosedError: Read failed; socket already closed"
 			context.throw(ClosedError(msg)) 
-
-		finally:
-			if DEBUG: print fileno, msg
 
 
 class write:
@@ -154,20 +169,17 @@ class write:
 		self.data = data
 	
 	def __call__(self, context):
-		fileno = context.fileno
 		context.request = self.data
 		
 		try:
+			context.log('write, seting epoll for EPOLLOUT')
 			#epoll.modify(fileno, select.EPOLLOUT | select.EPOLLET)
-			epoll.modify(fileno, select.EPOLLOUT)
-			msg = 'set epoll write'
+			epoll.modify(context.fileno, select.EPOLLOUT)
 
 		except IOError as ex:
 			msg = "ClosedError: Write failed; Socket already closed"
 			context.throw(ClosedError(msg)) 
 		
-		finally:
-			if DEBUG: print fileno, msg
 
 
 class close:
@@ -175,7 +187,7 @@ class close:
 	def __call__(self, context):
 		
 		try:
-			msg = "set epoll close"
+			context.log("close, setting epoll to 0")
 			context.sock.shutdown(socket.SHUT_RDWR)
 			# set as 0 for level or EPOLLET for edge triggered
 			#epoll.modify(fileno, select.EPOLLET)
@@ -186,9 +198,6 @@ class close:
 			msg = "ConnectionError during close [%s] %s" % (err, errmsg)
 			context.throw(ConnectionError(msg))
 
-		finally:
-			if DEBUG: print context.fileno, msg
-	
 
 
 def run(taskgen):
@@ -222,22 +231,26 @@ def run(taskgen):
 			
 			if fileno not in connections:
 				print "fileno %s not in connections. epoll event %x" % (fileno, event)
+				sys.exit(1)
 
 			# get context
 			context = connections[fileno]
 			sock = context.sock
 			task = context.task
 			context.atime = time.time()
+			global current
+			current = context
 			
 			try:
 		
 				# read response
 				if event & select.EPOLLIN:
-					response = sock.recv(8096)
-					if DEBUG: print fileno, "bytes read", len(response)
+					blocksize = 8096
+					response = sock.recv(blocksize)
+					context.log("%i bytes read" % len(response))
 					
 					# len zero read means EOF
-					if len(response) == 0:
+					if len(response) < blocksize:
 						# send response, get new opp
 						context.send(context.response)
 					else:
@@ -247,23 +260,23 @@ def run(taskgen):
 				elif event & select.EPOLLOUT:
 					# first check that connect() completed successfully
 					err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+					context.log('EPOLLOUT')
 					if err:
-						if DEBUG: print fileno, errno.errorcode[err], "EPOLLOUT"
 						context.throw(ConnectError("ConnectError [%s] connection failed" % errno.errorcode[err]))
 						# epoll automatically modifies failed connections to EPOLLHUP; no need to unregister here
 						#connections.pop(fileno, None)
 						epoll.unregister(fileno)
 					elif not context.request:
-						if DEBUG: print fileno, "connection successful"
+						context.log("connection successful")
 						context.send(None)
 					else:
 						byteswritten = sock.send(context.request)
-						if DEBUG: print fileno, "bytes written", byteswritten
+						context.log("%i bytes written" % byteswritten)
 						context.send(byteswritten)
 
 				# connection closed
-				elif event & select.EPOLLHUP:
-					if DEBUG: print fileno, "EPOLLHUP, connection closed"
+				if event & select.EPOLLHUP:
+					context.log("EPOLLHUP, connection closed")
 					
 					epoll.unregister(fileno)
 					connections.pop(fileno, None)
@@ -271,17 +284,14 @@ def run(taskgen):
 					# advance the coroutine
 					context.send(None)
 	
-				# throw unhandled states to task
-				#else:
-					# includes select.EPOLLERR
-				#	context.throw(EpollError("EpollError [%s]" % event))
-				#	sys.exit(1)
+				if event & select.EPOLLERR:
+					context.throw(EpollError("EpollError %s" % event))
+					sys.exit(1)
 
 			# throw any socket/epoll exceptions not handled by other methods
 			except socket.error, socket.msg:
 				(err, errmsg) = socket.msg.args
-
-				if DEBUG: print fileno, err, errmsg
+				context.log("socket.error %s %s" % (err, errmsg))	
 				connections.pop(fileno, None)
 				epoll.unregister(fileno)
 			
@@ -292,8 +302,7 @@ def run(taskgen):
 				else:
 					context.throw(SockError("SockError [%s] %s" % (err, errmsg)))
 
-		# for/else
-		# else epoll for-loop had no events. Let's check connection states.
+		# for-else epoll loop had no events. Let's check connection states.
 		else:
 			now = time.time()
 			for fileno,context in connections.items():
@@ -302,13 +311,41 @@ def run(taskgen):
 				err = context.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
 				
 				if err:
-					if DEBUG: print fileno, "connection state", errno.errorcode[err]
+					context.log("connection state %s" % errno.errorcode[err])
 				
 				elif delta > context.timeout:
 					msg = "TimeoutError no connection activity for %.3f seconds" % delta
-					if DEBUG: print fileno, msg
 					close()(context)
 					context.throw(TimeoutError(msg))
+
+
+def debug(taskgen):
+	"""A debugging wrapper for run()"""
+	
+	start = time.time()
+	try:
+		run(taskgen)
+
+	except Exception as ex:
+	
+		print '\n-- context --\n'
+		for t in current.tracelog:
+			print t
+
+		# also print stack trace
+		import traceback
+		traceback.print_exc()
+		print ex
+
+	finally:
+		end = time.time()
+		print '\n-- statistics --\n'
+		for k,v in statistics.items():
+			print '%s : %s' % (k,v)
+		
+		completed = statistics['Completed']
+		print "%i connections completed in %.3f seconds (%.3f per sec)\n" % (completed, end-start, completed/(end-start)) 
+
 
 
 
@@ -326,6 +363,9 @@ edit /etc/security/limits.conf
 *                soft    nofile          65535
 *                hard    nofile          65535
 then restart the shell
+
+# to limit the amount of kernel memory used by epoll set
+/proc/sys/fs/epoll/max_user_watches
 
 
 """
