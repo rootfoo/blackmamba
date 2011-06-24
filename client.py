@@ -4,14 +4,14 @@ import time
 import errno
 import ssl
 
-DEBUG = True
-VERBOSE = True
+VERBOSE = False
 
 dns_cache = {}		# {host : ip}
 connections = {}	# {fileno : context}
 statistics = {}		# {Error : count}
 epoll = select.epoll()
 maxcons = 1000
+global current
 current = None
 
 
@@ -77,7 +77,7 @@ class SockError(ConnectionError):
 class ClosedError(ConnectionError):
 	pass
 
-class EpollError(Exception):
+class EpollError(ConnectionError):
 	pass
 
 
@@ -208,7 +208,7 @@ def run(taskgen):
 
 	while connections or not done:
 
-		if DEBUG: print "-- loop(%i) --" % len(connections)
+		if VERBOSE: print "-- loop(%i) --" % len(connections)
 
 		#### ADD TASK ####
 		
@@ -263,9 +263,7 @@ def run(taskgen):
 					context.log('EPOLLOUT')
 					if err:
 						context.throw(ConnectError("ConnectError [%s] connection failed" % errno.errorcode[err]))
-						# epoll automatically modifies failed connections to EPOLLHUP; no need to unregister here
-						#connections.pop(fileno, None)
-						epoll.unregister(fileno)
+						# epoll automatically modifies failed connections to EPOLLHUP; no need to epoll.unregister here
 					elif not context.request:
 						context.log("connection successful")
 						context.send(None)
@@ -286,7 +284,7 @@ def run(taskgen):
 	
 				if event & select.EPOLLERR:
 					context.throw(EpollError("EpollError %s" % event))
-					sys.exit(1)
+				#	sys.exit(1)
 
 			# throw any socket/epoll exceptions not handled by other methods
 			except socket.error, socket.msg:
@@ -301,6 +299,10 @@ def run(taskgen):
 					context.throw(ResetError("ResetError [%s] %s" % (err, errmsg)))
 				else:
 					context.throw(SockError("SockError [%s] %s" % (err, errmsg)))
+			
+				# advance to keep statistics accurate (throws StopIteration on purpose)
+				context.send(None)
+
 
 		# for-else epoll loop had no events. Let's check connection states.
 		else:
@@ -323,6 +325,7 @@ def debug(taskgen):
 	"""A debugging wrapper for run()"""
 	
 	start = time.time()
+	
 	try:
 		run(taskgen)
 
@@ -332,6 +335,7 @@ def debug(taskgen):
 		for t in current.tracelog:
 			print t
 
+		print '\n-- trace --\n'
 		# also print stack trace
 		import traceback
 		traceback.print_exc()
