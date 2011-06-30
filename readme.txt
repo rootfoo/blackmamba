@@ -1,4 +1,6 @@
 Blackmamba
+by Marcus Hodges
+
 
 Introduction
 ------------
@@ -75,24 +77,32 @@ Downloading a webpage 100 times with Blackmamba:
 Explanation
 ----------
 
- . The get() function is the implimentation of a protocol; it defines which network operations to perform and in what order. A Blackmamba protocol can be any coroutine that uses the blackmamba system calls.  
- . Blackmamba's connect system call establishes a connection to the host. The Python "yield" expression suspends execution until the connection is established and then resumes automatically; it is the Python magic that makes code non-blocking. Anytime yield is used in this manner the function is technically a coroutine. However, so long as each Blackmamba system call is preceeded by the yield keyword, that detail can be overlooked.
- . The the write system call is equivelent to socket.write or socket.send. Execution is suspended by yield until the write has completed. Then execution continues with the next line. While execution is suspended other functions/protocols may be resumed if thier pending network operations have completed. 
- . Read data from the connection and store it in the response variable. Again, yield suspends execution until the response has been fully read. At the moment read() returns all data availible and the amount to read cannot be specified. This behavior may change in later versions.
- . Close the connection and resume upon completion. 
- . There is no gain in using a concurrent networking library if there is only one network operation to perform; typical usage will involve multiple silmaltaneous network operation. To accomplish this, Blackmamba uses Python Generators. The generate() function in this example is a Generator that yields protocols. Remember, for the sake of Blackmamba programming, a protocol is any function that uses the the "yield syscall()" syntax.
- . The run() method is what peforms all the work. It expects a generator as the first argument and pulls protocols from it and executes them thousands at a time. Because the run() method blocks until there are no more items, it should be the last thing called by the application.
+ 3. The get() function is the implimentation of a protocol; it defines which network operations to perform and in what order. A Blackmamba protocol can be any coroutine that uses the blackmamba system calls.  
+ 5. Blackmamba's connect system call establishes a connection to the host. The Python "yield" expression suspends execution until the connection is established and then resumes automatically; it is the Python magic that makes code non-blocking. Anytime yield is used in this manner the function is technically a coroutine. However, so long as each Blackmamba system call is preceeded by the yield keyword, that detail can be overlooked.
+ 6. The the write system call is equivelent to socket.write or socket.send. Execution is suspended by yield until the write has completed. Then execution continues with the next line. While execution is suspended other functions/protocols may be resumed if thier pending network operations have completed. 
+ 7. Read data from the connection and store it in the response variable. Again, yield suspends execution until the response has been fully read. At the moment read() returns all data availible and the amount to read cannot be specified. This behavior may change in later versions.
+ 8. Close the connection and resume upon completion. 
+ 11. There is no gain in using a concurrent networking library if there is only one network operation to perform; typical usage will involve multiple silmaltaneous network operation. To accomplish this, Blackmamba uses Python Generators. The generate() function in this example is a Generator that yields protocols. Remember, for the sake of Blackmamba programming, a protocol is any function that uses the the "yield syscall()" syntax.
+ 15. The run() method is what peforms all the work. It expects a generator as the first argument and pulls protocols from it and executes them thousands at a time. Because the run() method blocks until there are no more items, it should be the last thing called by the application.
 
-For comparison, using Blackmamba instead of sockets required a total increase of one line of code and executed XXX times faster. 
+For comparison, using Blackmamba instead of sockets required a total increase of one line of code and executed roughly XXX times faster. 
 
 
 Project Status
 --------------
 
+Blackmamba originated as the byproduct of my personal quest to understand concurrent and parrallel programming techniques. My motivation began with the need to rapidly prototype fast penetration testing tools for brute force and discovery. Tired of the pains of resource sharing in multithreaded applications, I looked to non-blocking approaches. After getting lost in the world of Twisted deferreds, callback chains, and other confusing and interface heavy approaches, I discovered the simplicity and beauty of coroutines. 
+
+
+Known Issues
+
  * The Blackmamba project is very Beta. It still undergoing development and debugging. It is not ready for production.
  * SSL support has not yet been implimented but is high on the todo list.
  * DNS lookups still block. This is also high on the todo list. This means that the library is not yet suitable for making thousands of concurrent connections do different hosts. It is, however, already useful for thousands of connections to a limmited number of hosts. 
 
+Requirements
+
+ * python / linux
 
 Download
 --------
