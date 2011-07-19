@@ -94,14 +94,11 @@ class connect:
 
 	def __call__(self, context):
 		""" Create a non-blocking socket and enqueue it for connection. """
-		# do not set sock.timeout() it modifies blocking behavior
-		# absolutely do not settimeout()! This also set's blocking.
-		s = socket.socket()
-	
+		# do not settimeout() it also set's blocking.
+		sock = socket.socket()
+
 		if self.ssl:
 			sock = ssl.wrap_socket(s)
-		else:
-			sock = s
 		
 		sock.setblocking(0)
 		# do not linger on close, kernel will try to gracefully close in background
