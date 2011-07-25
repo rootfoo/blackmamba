@@ -246,12 +246,12 @@ def run(taskgen):
 					response = sock.recv(blocksize)
 					context.log("%i bytes read" % len(response))
 					
+					context.response += response
+
 					# len zero read means EOF
 					if len(response) < blocksize:
 						# send response, get new opp
 						context.send(context.response)
-					else:
-						context.response += response
 				
 				# send request
 				elif event & select.EPOLLOUT:
