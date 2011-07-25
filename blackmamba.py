@@ -41,7 +41,7 @@ class Context:
 			statistics[name] = statistics.get(name,0) + 1
 
 	def send(self, sendval=None):
-		"""A convenience method to advance a task (coroutine) to it's next state"""
+		"""A convenience method to advance a task (coroutine) to its next state"""
 		try:
 			syscall = self.task.send(sendval)
 			syscall(self)
@@ -105,14 +105,14 @@ class connect:
 		#sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 0, 0))
 		sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 		# add socket to list of pending connections
-		# dont actually call connect() here, just enqueue it
+		# don't actually call connect() here, just enqueue it
 		context.fileno = sock.fileno()
 		context.sock = sock 
 		context.timeout = self.timeout
 		context.atime = time.time()
 
 		# resolve the hostname only if not in cache
-		# TODO: DNS lookups block. Impliment the DNS protocol and do this concurrently as well. 
+		# TODO: DNS lookups block. Implement the DNS protocol and do this concurrently as well. 
 		try:
 			if self.host in dns_cache:
 				ip = dns_cache.setdefault(self.host)
@@ -246,12 +246,12 @@ def run(taskgen):
 					response = sock.recv(blocksize)
 					context.log("%i bytes read" % len(response))
 					
+					context.response += response
+
 					# len zero read means EOF
 					if len(response) < blocksize:
 						# send response, get new opp
 						context.send(context.response)
-					else:
-						context.response += response
 				
 				# send request
 				elif event & select.EPOLLOUT:
