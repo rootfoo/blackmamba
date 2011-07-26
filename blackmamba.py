@@ -344,7 +344,7 @@ def debug(taskgen):
 		for k,v in statistics.items():
 			print '%s : %s' % (k,v)
 		
-		completed = statistics['Completed']
+		completed = statistics.get('Completed',0)
 		print "%i connections completed in %.3f seconds (%.3f per sec)\n" % (completed, end-start, completed/(end-start)) 
 
 
