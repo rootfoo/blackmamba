@@ -15,7 +15,7 @@ maxcons = 1000
 global current
 current = None
 queue = Queue()
-
+timers = []
 
 
 class ConnectionError(Exception):
@@ -42,6 +42,9 @@ class ClosedError(ConnectionError):
 class EpollError(Exception):
 	pass
 
+class Timer(Exception):
+	pass
+
 
 
 class Context:
@@ -58,12 +61,17 @@ class Context:
 		"""A convenience method to pass exceptions to a task"""
 		try:
 			self.log(error)
-			self.task.throw(error)
+			syscall = self.task.throw(error)
+		
+			if isinstance(syscall, timer):
+				syscall(self) # <-- this may be buggy! added for timer support
+				# always advance timer syscalls to prevent the next throw from landing in an except clause
+				self.task.send(None)
 
 		except StopIteration as ex:
 			self.log('StopIteration')
 			pass
-		
+
 		except ConnectionError as ex: 
 			# task didnt except error, add to statistics and ignore
 			name = ex.__class__.__name__
@@ -199,6 +207,15 @@ class close:
 			msg = "ConnectionError during close [%s] %s" % (err, errmsg)
 			context.throw(ConnectionError(msg))
 
+class timer:
+	"""system call to throw an exception on a timer"""
+	def __init__(self, duration):
+		self.event_timeout = time.time() + duration
+
+	def __call__(self, context):
+		context.log("timer syscall")
+		context.event_timeout = self.event_timeout 
+		timers.append(context)
 
 
 def add(task):
@@ -224,6 +241,7 @@ def run(taskgen):
 			try:
 				# get task from queue first
 				if not queue.empty():
+					print "getting task from queue"
 					task = queue.get()
 				# get task from generator
 				else:
@@ -333,11 +351,16 @@ def run(taskgen):
 					close()(context)
 					context.throw(TimeoutError(msg))
 
-
+		#### EVENT TIMERS ####
+		now = time.time()
+		for context in timers:
+			if now > context.event_timeout:
+				timers.remove(context)
+				context.throw(Timer())
 
 def debug(taskgen):
 	"""A debugging wrapper for run()"""
-	
+	import traceback
 	start = time.time()
 	
 	try:
@@ -346,12 +369,12 @@ def debug(taskgen):
 	except Exception as ex:
 	
 		print '\n-- context --\n'
-		for t in current.tracelog:
-			print t
+		if current:
+			for t in current.tracelog:
+				print t
 
-		print '\n-- trace --\n'
 		# also print stack trace
-		import traceback
+		print '\n-- trace --\n'
 		traceback.print_exc()
 		print ex
 
