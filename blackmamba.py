@@ -3,6 +3,7 @@ import sys, struct
 import time
 import errno
 import ssl
+from Queue import Queue
 
 VERBOSE = False
 
@@ -13,13 +14,41 @@ epoll = select.epoll()
 maxcons = 1000
 global current
 current = None
+queue = Queue()
+
+
+
+class ConnectionError(Exception):
+	pass
+
+class TimeoutError(ConnectionError):
+	pass
+
+class ConnectError(ConnectionError):
+	pass
+
+class DomainError(ConnectionError):
+	pass
+
+class ResetError(ConnectionError):
+	pass
+	
+class SockError(ConnectionError):
+	pass
+
+class ClosedError(ConnectionError):
+	pass
+
+class EpollError(Exception):
+	pass
+
 
 
 class Context:
 	def __init__(self, task):
 		"""
 		A Context associates a task with a socket, request, response, ...
-		task is the only required attribute. All others are set dynamically.
+		self.task is the only required attribute. All others are set dynamically.
 		"""
 		self.task = task
 		self.request = None
@@ -56,35 +85,10 @@ class Context:
 		self.tracelog.append(msg)
 		if VERBOSE: print "[%i] %s" % (self.fileno, msg)
 
-class ConnectionError(Exception):
-	pass
-
-class TimeoutError(ConnectionError):
-	pass
-
-class ConnectError(ConnectionError):
-	pass
-
-class DomainError(ConnectionError):
-	pass
-
-class ResetError(ConnectionError):
-	pass
-	
-class SockError(ConnectionError):
-	pass
-
-class ClosedError(ConnectionError):
-	pass
-
-class EpollError(ConnectionError):
-	pass
-
 
 class connect:
 	"""
-	connect system call. 
-	Queue the task for connection but doesn't actuall call connect() which blocks
+	Connect system call. Lookup hostname, connect non-blocking socket, and create a context.
 	"""
 	def __init__(self, host, port, timeout=30, ssl=False):
 		self.host = host
@@ -197,6 +201,12 @@ class close:
 
 
 
+def add(task):
+	"""convenience method to add task objects without a generator"""
+	queue.put(task)
+
+
+
 def run(taskgen):
 	"""
 	The asyncronous loop. taskgen is a generator that produces tasks.
@@ -212,10 +222,16 @@ def run(taskgen):
 		# connect new tasks if workload under max and tasks remain
 		while not done and len(connections) < maxcons:
 			try:
-				# get task; prime coroutine; call syscall
-				task = taskgen.next()
+				# get task from queue first
+				if not queue.empty():
+					task = queue.get()
+				# get task from generator
+				else:
+					task = taskgen.next()
+				# prime coroutine; call syscall
 				context = Context(task)
 				context.send(None)
+
 			except StopIteration as ex:
 				# taskgen.next() threw StopIteration (not context.send)
 				done = True
@@ -281,7 +297,7 @@ def run(taskgen):
 	
 				if event & select.EPOLLERR:
 					context.throw(EpollError("EpollError %s" % event))
-				#	sys.exit(1)
+					#sys.exit(1)
 
 			# throw any socket/epoll exceptions not handled by other methods
 			except socket.error, socket.msg:
@@ -316,6 +332,7 @@ def run(taskgen):
 					msg = "TimeoutError no connection activity for %.3f seconds" % delta
 					close()(context)
 					context.throw(TimeoutError(msg))
+
 
 
 def debug(taskgen):
