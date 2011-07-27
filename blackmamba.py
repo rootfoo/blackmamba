@@ -221,7 +221,7 @@ class timer:
 def add(task):
 	"""convenience method to add task objects without a generator"""
 	queue.put(task)
-
+	print "adding task (%i)" % queue.qsize()
 
 
 def run(taskgen):
@@ -236,13 +236,17 @@ def run(taskgen):
 
 		#### ADD TASK ####
 		
+		# we are no longer done if tasks were added to the queue at runtime
+		qdone = queue.empty()
+
 		# connect new tasks if workload under max and tasks remain
-		while not done and len(connections) < maxcons:
+		while not (done and qdone) and len(connections) < maxcons:
 			try:
 				# get task from queue first
 				if not queue.empty():
 					print "getting task from queue"
 					task = queue.get()
+					qdone = queue.empty()
 				# get task from generator
 				else:
 					task = taskgen.next()
