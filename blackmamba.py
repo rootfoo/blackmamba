@@ -67,6 +67,10 @@ class Context:
 				syscall(self) # <-- this may be buggy! added for timer support
 				# always advance timer syscalls to prevent the next throw from landing in an except clause
 				self.task.send(None)
+		
+		except Timer as ex:
+			self.log('Timer thrown to except clause; putting back in queue')
+			timers.append(self)
 
 		except StopIteration as ex:
 			self.log('StopIteration')
@@ -286,10 +290,11 @@ def run(taskgen):
 					
 					context.response += response
 
-					# len zero read means EOF
+					# less than blocksize means EOF
 					if len(response) < blocksize:
-						# send response, get new opp
-						context.send(context.response)
+						if len(context.response) > 0:
+							# send response, get new opp
+							context.send(context.response)
 				
 				# send request
 				elif event & select.EPOLLOUT:
@@ -314,6 +319,10 @@ def run(taskgen):
 					epoll.unregister(fileno)
 					connections.pop(fileno, None)
 					sock.close()
+					
+					err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+					if err:
+						context.log('ERR in EPOLLUP [%s]' % errno.errorcode[err])
 					# advance the coroutine
 					context.send(None)
 	
@@ -357,10 +366,9 @@ def run(taskgen):
 
 		#### EVENT TIMERS ####
 		now = time.time()
-		for context in timers:
-			if now > context.event_timeout:
-				timers.remove(context)
-				context.throw(Timer())
+		for context in filter(lambda c: now > c.event_timeout, timers):
+			timers.remove(context)
+			context.throw(Timer())
 
 def debug(taskgen):
 	"""A debugging wrapper for run()"""
