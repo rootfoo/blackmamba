@@ -6,19 +6,26 @@ import ssl
 from Queue import Queue
 import adns # requires libadns1, on ubuntu: apt-get install python-adns
 
-VERBOSE = True
+#### Configuration ####
+
+class config:
+	verbose = False
+	maxcons = 1000
+
+#### State ####
 
 dns_cache = {}		# {host : ip}
 adns_queries = {}	# {query : context}
 connections = {}	# {fileno : context}
 statistics = {}		# {Error : count}
 epoll = select.epoll()
-maxcons = 1000
-global current
-current = None
 queue = Queue()
 timers = []
+global current
+current = None
+resolver = adns.init(adns.iflags.noautosys)
 
+#### Exeptions ####
 
 class ConnectionError(Exception):
 	pass
@@ -47,8 +54,7 @@ class EpollError(Exception):
 class Timer(Exception):
 	pass
 
-resolver = adns.init(adns.iflags.noautosys)
-
+#### Context and system calls
 
 class Context:
 	def __init__(self, task):
@@ -100,7 +106,7 @@ class Context:
 			msg += " (Socket Error [%s] %s)" % (sockerror, errno.errorcode[sockerror])
 		self.tracelog.append(msg)
 		fileno = self.fileno if hasattr(self, 'fileno') else ""
-		if VERBOSE: print "[%s] %s" % (fileno, msg)
+		if config.verbose: print "[%s] %s" % (fileno, msg)
 
 
 class resolve:
@@ -266,6 +272,8 @@ def add(task):
 	print "adding task (%i)" % queue.qsize()
 
 
+#### The main event loop ####
+
 def run(taskgen):
 	"""
 	The asyncronous loop. taskgen is a generator that produces tasks.
@@ -275,7 +283,7 @@ def run(taskgen):
 	while connections or resolver.allqueries() or not done:
 
 		# use a blank line to separate messages in each loop
-		if VERBOSE: print ""
+		if config.verbose: print ""
 
 		#### ADD TASK ####
 		
@@ -283,8 +291,8 @@ def run(taskgen):
 		qdone = queue.empty()
 
 		# connect new tasks if workload under max and tasks remain
-		# while not (done and qdone) and len(connections) < maxcons:
-		while not done and len(connections) + len(resolver.allqueries()) < maxcons:
+		# while not (done and qdone) and len(connections) < config.maxcons:
+		while not done and len(connections) + len(resolver.allqueries()) < config.maxcons:
 			try:
 				# get task from queue first
 				if not queue.empty():
@@ -435,6 +443,7 @@ def run(taskgen):
 		for context in filter(lambda c: now > c.event_timeout, timers):
 			timers.remove(context)
 			context.throw(Timer())
+
 
 def debug(taskgen):
 	"""A debugging wrapper for run()"""
