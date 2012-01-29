@@ -4,10 +4,12 @@ import time
 import errno
 import ssl
 from Queue import Queue
+import adns
 
 VERBOSE = True
 
 dns_cache = {}		# {host : ip}
+adns_queries = {}	# {query : context}
 connections = {}	# {fileno : context}
 statistics = {}		# {Error : count}
 epoll = select.epoll()
@@ -45,6 +47,7 @@ class EpollError(Exception):
 class Timer(Exception):
 	pass
 
+resolver = adns.init(adns.iflags.noautosys)
 
 
 class Context:
@@ -97,9 +100,38 @@ class Context:
 			msg += " (Socket Error [%s] %s)" % (sockerror, errno.errorcode[sockerror])
 		self.tracelog.append(msg)
 		if VERBOSE: print "[%i] %s" % (self.fileno, msg)
-		#if err:
-			#	context.log('ERR in EPOLLUP [%s]' % errno.errorcode[err])
 
+
+class resolve:
+	"""
+	resolve system call.
+	"""
+	def __init__(self, host, record_type = adns.rr.A):
+		self.host = host
+		self.record_type = record_type
+	
+	def __call__(self, context):
+		# be sure to keep a reference to the query, or adns-python gets very upset
+		query = resolver.submit(self.host, self.record_type, 0)
+		adns_queries[query] = context
+		context.adns_host = self.host
+		context.adns_record_type = self.record_type
+
+class syncresolve:
+	"""
+	synchronous resolve system call.
+	"""
+	def __init__(self, host):
+		self.host = host
+	
+	def __call__(self, context):
+		try:
+			ip = socket.gethostbyname(self.host)
+			dns_cache[self.host] = ip
+		# throw DNS errors
+		except socket.gaierror as ex:
+			msg = "DomainError [%s] %s" % (ex.args)
+			context.throw(DomainError(msg))
 
 class connect:
 	"""
@@ -113,11 +145,12 @@ class connect:
 
 	def __call__(self, context):
 		""" Create a non-blocking socket and enqueue it for connection. """
-		# do not settimeout() it also set's blocking.
+		# do not settimeout(); it also sets blocking.
 		sock = socket.socket()
 
-		if self.ssl:
-			sock = ssl.wrap_socket(s)
+		# nee to use openssl probably
+		#if self.ssl:
+		#	sock = ssl.wrap_socket(s)
 		
 		sock.setblocking(0)
 		# do not linger on close, kernel will try to gracefully close in background
@@ -134,8 +167,10 @@ class connect:
 		# TODO: DNS lookups block. Implement the DNS protocol and do this concurrently as well. 
 		try:
 			if self.host in dns_cache:
+				context.log("DNS cache hit: [%s]" % self.host)
 				ip = dns_cache.setdefault(self.host)
 			else:
+				context.log("DNS cache miss: [%s]" % self.host)
 				ip = socket.gethostbyname(self.host)
 				dns_cache[self.host] = ip
 			
@@ -237,7 +272,7 @@ def run(taskgen):
 	"""
 	done = False
 
-	while connections or not done:
+	while connections or resolver.allqueries() or not done:
 
 		# use a blank line to separate messages in each loop
 		if VERBOSE: print ""
@@ -248,7 +283,8 @@ def run(taskgen):
 		qdone = queue.empty()
 
 		# connect new tasks if workload under max and tasks remain
-		while not (done and qdone) and len(connections) < maxcons:
+		#while not (done and qdone) and len(connections) < maxcons:
+		while not done and len(connections) + len(resolver.allqueries()) < maxcons:
 			try:
 				# get task from queue first
 				if not queue.empty():
@@ -266,8 +302,27 @@ def run(taskgen):
 				# taskgen.next() threw StopIteration (not context.send)
 				done = True
 
-		#### READ, WRITE, CLOSE ####
+		#### DNS ####
 
+		# get adns events
+		for adns_query in resolver.completed(0):
+			context = adns_queries[adns_query]
+			response = adns_query.check()
+
+			host = context.adns_host
+			record_type = context.adns_record_type
+			del context.adns_host
+			del context.adns_record_type
+			del adns_queries[adns_query]
+			if response[3]:
+				if record_type == adns.rr.A:
+					dns_cache[host] = response[3][0]
+				context.send(response)
+			else:
+				context.throw(DomainError('adns unable to resolve: %s' % host))
+
+		#### READ, WRITE, CLOSE ####
+		
 		# get epoll events
 		events = epoll.poll(1)
 		for fileno, event in events:
@@ -304,9 +359,9 @@ def run(taskgen):
 				
 				# send request
 				elif event & select.EPOLLOUT:
-					# first check that connect() completed successfully
 					err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
 					context.log('EPOLLOUT', err)
+					# first check that connect() completed successfully
 					if err:
 						# epoll automatically modifies failed connections to EPOLLHUP; no need to epoll.unregister here
 						context.throw(ConnectError("ConnectError [%s] connection failed" % errno.errorcode[err]))
