@@ -4,7 +4,7 @@ import time
 import errno
 import ssl
 from Queue import Queue
-import adns
+import adns # requires libadns1, on ubuntu: apt-get install python-adns
 
 VERBOSE = True
 
@@ -99,7 +99,8 @@ class Context:
 		if sockerror:
 			msg += " (Socket Error [%s] %s)" % (sockerror, errno.errorcode[sockerror])
 		self.tracelog.append(msg)
-		if VERBOSE: print "[%i] %s" % (self.fileno, msg)
+		fileno = self.fileno if hasattr(self, 'fileno') else ""
+		if VERBOSE: print "[%s] %s" % (fileno, msg)
 
 
 class resolve:
@@ -163,8 +164,7 @@ class connect:
 		context.timeout = self.timeout
 		context.atime = time.time()
 
-		# resolve the hostname only if not in cache
-		# TODO: DNS lookups block. Implement the DNS protocol and do this concurrently as well. 
+		# resolve the hostname if not in cache
 		try:
 			if self.host in dns_cache:
 				context.log("DNS cache hit: [%s]" % self.host)
@@ -283,7 +283,7 @@ def run(taskgen):
 		qdone = queue.empty()
 
 		# connect new tasks if workload under max and tasks remain
-		#while not (done and qdone) and len(connections) < maxcons:
+		# while not (done and qdone) and len(connections) < maxcons:
 		while not done and len(connections) + len(resolver.allqueries()) < maxcons:
 			try:
 				# get task from queue first
@@ -302,7 +302,7 @@ def run(taskgen):
 				# taskgen.next() threw StopIteration (not context.send)
 				done = True
 
-		#### DNS ####
+		#### ASYNC DNS ####
 
 		# get adns events
 		for adns_query in resolver.completed(0):
@@ -316,6 +316,7 @@ def run(taskgen):
 			del adns_queries[adns_query]
 			if response[3]:
 				if record_type == adns.rr.A:
+					context.log("ADNS resolved [%s]" % host)
 					dns_cache[host] = response[3][0]
 				context.send(response)
 			else:
