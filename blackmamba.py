@@ -5,7 +5,7 @@ import errno
 import ssl
 from Queue import Queue
 
-VERBOSE = False
+VERBOSE = True
 
 dns_cache = {}		# {host : ip}
 connections = {}	# {fileno : context}
@@ -73,8 +73,7 @@ class Context:
 			timers.append(self)
 
 		except StopIteration as ex:
-			self.log('StopIteration')
-			pass
+			self.log('StopIteration caught after context.throw()')
 
 		except ConnectionError as ex: 
 			# task didnt except error, add to statistics and ignore
@@ -92,10 +91,14 @@ class Context:
 			statistics[name] = statistics.get(name,0) + 1
 			self.log(name)
 
-	def log(self, msg):
+	def log(self, msg, sockerror=None):
 		"""method to log debugging messages associated with a fileno"""
+		if sockerror:
+			msg += " (Socket Error [%s] %s)" % (sockerror, errno.errorcode[sockerror])
 		self.tracelog.append(msg)
 		if VERBOSE: print "[%i] %s" % (self.fileno, msg)
+		#if err:
+			#	context.log('ERR in EPOLLUP [%s]' % errno.errorcode[err])
 
 
 class connect:
@@ -141,7 +144,7 @@ class connect:
 			err = sock.connect_ex(context.address)
 			
 			# for debugging
-			context.log("connecting... [%s]" % errno.errorcode[err])
+			context.log("Connecting [%s]" % errno.errorcode[err])
 
 			if err != errno.EINPROGRESS:
 				msg = "ConnectError [%s]" % (errno.errorcode[err])
@@ -236,7 +239,8 @@ def run(taskgen):
 
 	while connections or not done:
 
-		if VERBOSE: print "-- loop(%i) --" % len(connections)
+		# use a blank line to separate messages in each loop
+		if VERBOSE: print ""
 
 		#### ADD TASK ####
 		
@@ -284,6 +288,8 @@ def run(taskgen):
 		
 				# read response
 				if event & select.EPOLLIN:
+					err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+					context.log('EPOLLIN', err)
 					blocksize = 8096
 					response = sock.recv(blocksize)
 					context.log("%i bytes read" % len(response))
@@ -300,13 +306,15 @@ def run(taskgen):
 				elif event & select.EPOLLOUT:
 					# first check that connect() completed successfully
 					err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-					context.log('EPOLLOUT')
+					context.log('EPOLLOUT', err)
 					if err:
-						context.throw(ConnectError("ConnectError [%s] connection failed" % errno.errorcode[err]))
 						# epoll automatically modifies failed connections to EPOLLHUP; no need to epoll.unregister here
+						context.throw(ConnectError("ConnectError [%s] connection failed" % errno.errorcode[err]))
+					# when connections succeed epoll uses EPOLLOUT. If nothing to send, just advance the coroutine
 					elif not context.request:
 						context.log("connection successful")
 						context.send(None)
+					# connection succeeded and there is data to write
 					else:
 						byteswritten = sock.send(context.request)
 						context.log("%i bytes written" % byteswritten)
@@ -314,32 +322,34 @@ def run(taskgen):
 
 				# connection closed
 				if event & select.EPOLLHUP:
-					context.log("EPOLLHUP, connection closed")
+					err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+					context.log('EPOLLHUP', err)
 					
 					epoll.unregister(fileno)
 					connections.pop(fileno, None)
-					sock.close()
+					#sock.close()
 					
-					err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-					if err:
-						context.log('ERR in EPOLLUP [%s]' % errno.errorcode[err])
 					# advance the coroutine
 					context.send(None)
-	
-				if event & select.EPOLLERR:
-					context.throw(EpollError("EpollError %s" % event))
+			
+					# remote host closed connection
+					if err == errno.ECONNRESET or err == errno.ENOTCONN:
+						context.throw(ResetError("ResetError [%s] %s" % (err, errno.errorcode[err])))
+		
+				#if event & select.EPOLLERR:
+				#	context.throw(EpollError("EpollError %s" % event))
 					#sys.exit(1)
 
 			# throw any socket/epoll exceptions not handled by other methods
 			except socket.error, socket.msg:
 				(err, errmsg) = socket.msg.args
-				context.log("socket.error %s %s" % (err, errmsg))	
+				context.log("socket.error [%s] caught in run(): %s" % (err, errmsg))	
+				# pop but dont close an already closed connection
 				connections.pop(fileno, None)
 				epoll.unregister(fileno)
 			
 				# remote host closed connection
 				if err == errno.ECONNRESET or err == errno.ENOTCONN:
-					# pop but dont close an already closed connection
 					context.throw(ResetError("ResetError [%s] %s" % (err, errmsg)))
 				else:
 					context.throw(SockError("SockError [%s] %s" % (err, errmsg)))
@@ -348,7 +358,7 @@ def run(taskgen):
 				context.send(None)
 
 
-		# for-else epoll loop had no events. Let's check connection states.
+		# for-else: epoll loop had no events. Let's check connection states.
 		else:
 			now = time.time()
 			for fileno,context in connections.items():
@@ -397,7 +407,7 @@ def debug(taskgen):
 			print '%s : %s' % (k,v)
 		
 		completed = statistics.get('Completed',0)
-		print "%i connections completed in %.3f seconds (%.3f per sec)\n" % (completed, end-start, completed/(end-start)) 
+		print "%i task completed in %.3f seconds (%.3f per sec)\n" % (completed, end-start, completed/(end-start)) 
 
 
 
